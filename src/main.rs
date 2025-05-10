@@ -2,6 +2,7 @@
 #![no_main]
 #![feature(offset_of)]
 
+use core::arch::asm;
 use core::mem::offset_of;
 use core::mem::size_of;
 use core::panic::PanicInfo;
@@ -114,7 +115,11 @@ fn efi_main(_image_handle: EfiHandle, efi_system_table: &EfiSystemTable) {
     }
 
     // println!("Hello, world!");
-    loop {}
+    loop {
+        unsafe {
+            asm!("hlt");
+        }
+    }
 }
 
 #[panic_handler]
