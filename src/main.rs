@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 #![feature(offset_of)]
+#![feature(iter_array_chunks)]
 
 use core::arch::asm;
 use core::cmp::min;
@@ -12,6 +13,11 @@ use core::ptr::null_mut;
 type EfiVoid = u8;
 type EfiHandle = u64;
 type Result<T> = core::result::Result<T, &'static str>;
+
+const FONT_WIDTH: usize = 8;
+const FONT_HEIGHT: usize = 16;
+type Font = [[bool; FONT_WIDTH]; FONT_HEIGHT];
+type Fonts = [Font; 256];
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 #[must_use]
@@ -174,6 +180,88 @@ fn init_vram(efi_system_table: &EfiSystemTable) -> Result<VramBufferInfo> {
     })
 }
 
+fn init_bdf_font() -> Option<Fonts> {
+    // BDF のテキストデータ
+    const FONT_SOURCE: &str = include_str!("../third_party/font/shnm8x16r.bdf");
+
+    // 結果セット
+    let mut fonts = [[[false; FONT_WIDTH]; FONT_HEIGHT]; 256];
+
+    // BDF の各行
+    let mut lines = FONT_SOURCE.split('\n');
+    // 現在 BITMAP セクションにいるかどうか
+    let mut is_bitmap = false;
+    // 現在パース中の文字コード
+    let mut char_code: usize = 0;
+    // ビットマップの行番号
+    let mut row = 0;
+
+    while let Some(line) = lines.next() {
+        if line.starts_with("ENDCHAR") {
+            is_bitmap = false;
+            row = 0;
+            continue;
+        }
+        
+        if is_bitmap {
+            let mut column = 0;
+            for c in line.chars() {
+                // char -> &str
+                let bytes = [c as u8];
+                let s: &str = unsafe { core::str::from_utf8_unchecked(&bytes) };
+
+                let hex = u8::from_str_radix(s, 16).unwrap();
+                fonts[char_code][row][column * 4 + 0] = hex & 0b1000 != 0;
+                fonts[char_code][row][column * 4 + 1] = hex & 0b0100 != 0;
+                fonts[char_code][row][column * 4 + 2] = hex & 0b0010 != 0;
+                fonts[char_code][row][column * 4 + 3] = hex & 0b0001 != 0;
+
+                column += 1;
+            }
+
+            row += 1;
+            continue;
+        }
+
+        if line.starts_with("STARTCHAR") {
+            char_code = usize::from_str_radix(line.split(' ').last().unwrap(), 16).unwrap();
+            continue;
+        }
+
+        if line.starts_with("BITMAP") {
+            is_bitmap = true;
+            continue;
+        }
+    }
+
+    Some(fonts)
+}
+
+fn lookup_font(fonts: &Fonts, c: char) -> Option<Font> {
+    Some(fonts[c as usize])
+}
+
+fn draw_char<T: Bitmap>(buf: &mut T, color: u32, fonts: &Fonts, c: char, x: i64, y: i64) -> Result<()> {
+    let font = lookup_font(fonts, c).unwrap();
+
+    for fy in 0..FONT_HEIGHT {
+        for fx in 0..FONT_WIDTH {
+            if font[fy][fx] {
+                let _ = draw_point(buf, color, x + fx as i64, y + fy as i64);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn draw_str<T: Bitmap>(buf: &mut T, color: u32, fonts: &Fonts, str: &str, x: i64, y: i64) -> Result<()> {
+    for (i, c) in str.chars().enumerate() {
+        let _ = draw_char(buf, color, fonts, c, x + (i * FONT_WIDTH) as i64, y);
+    }
+    Ok(())
+}
+
 /// # Safety
 /// 
 /// (x, y) must be a valid point in the buf.
@@ -276,6 +364,7 @@ fn draw_line<T: Bitmap>(
 #[no_mangle]
 fn efi_main(_image_handle: EfiHandle, efi_system_table: &EfiSystemTable) {
     let mut vram = init_vram(efi_system_table).expect("Failed to init vram!");
+    let fonts = init_bdf_font().unwrap();
     
     let vw = vram.width;
     let vh = vram.height;
@@ -303,6 +392,8 @@ fn efi_main(_image_handle: EfiHandle, efi_system_table: &EfiSystemTable) {
         let _ =  draw_line(&mut vram, 0xff00ff, cx, cy, rect_size, i);
         let _ =  draw_line(&mut vram, 0xffffff, cx, cy, i, rect_size);
     }
+
+    let _ = draw_str(&mut vram, 0xffffff, &fonts, "Hello, World!", 500, 500);
 
     // println!("Hello, world!");
     loop {
